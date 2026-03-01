@@ -10,16 +10,11 @@ class Program
     {
         string[] prefixes = { "http://localhost:8080/" };
         string rootDirectory = args.Length > 0 ? args[0] : null;
-        SimpleListenerExample(prefixes, rootDirectory);
+        StartServer(prefixes, rootDirectory);
     }
 
-    static void SimpleListenerExample(string[] prefixes, string rootDirectory = null)
+    static void StartServer(string[] prefixes, string rootDirectory = null)
     {
-        if (!HttpListener.IsSupported)
-        {
-            Console.WriteLine("Windows XP SP2 or Server 2003 is required to use the HttpListener class.");
-            return;
-        }
         if (prefixes == null || prefixes.Length == 0)
             throw new ArgumentException("prefixes");
 
@@ -37,11 +32,11 @@ class Program
         while (true)
         {
             HttpListenerContext context = listener.GetContext();
-            Task.Run(() => ProcessRequest(context, rootDirectory, logFile, logLock));
+            Task.Run(() => HandleRequest(context, rootDirectory, logFile, logLock));
         }
     }
 
-    static void ProcessRequest(HttpListenerContext context, string rootDirectory, string logFile, object logLock)
+    static void HandleRequest(HttpListenerContext context, string rootDirectory, string logFile, object logLock)
     {
         HttpListenerRequest request = context.Request;
         HttpListenerResponse response = context.Response;
@@ -49,68 +44,83 @@ class Program
         int statusCode = 200;
         try
         {
-            string path = request.Url.AbsolutePath.TrimStart('/');
-            string fullPath = Path.GetFullPath(Path.Combine(rootDirectory, path));
-
-            if (!fullPath.StartsWith(rootDirectory, StringComparison.OrdinalIgnoreCase))
+            if (request.HttpMethod != "GET")
             {
-                response.StatusCode = 404;
-                response.StatusDescription = "Not Found";
-                WriteErrorResponse(response, "404 - Not Found");
-                statusCode = 404;
-            }
-            else if (File.Exists(fullPath))
-            {
-                ServeFile(response, fullPath);
-                statusCode = 200;
+                response.StatusCode = 405;
+                SendErrorPage(response, "405 - Method Not Allowed");
+                statusCode = 405;
             }
             else
             {
-                response.StatusCode = 404;
-                response.StatusDescription = "Not Found";
-                WriteErrorResponse(response, "404 - Not Found");
-                statusCode = 404;
+                string path = request.Url.AbsolutePath.TrimStart('/');
+
+                if (request.Url.AbsolutePath == "/")
+                {
+                    path = "index.html";
+                }
+
+                string fullPath = Path.GetFullPath(Path.Combine(rootDirectory, path));
+
+                if (!fullPath.StartsWith(rootDirectory, StringComparison.OrdinalIgnoreCase))
+                {
+                    response.StatusCode = 404;
+                    response.StatusDescription = "Not Found";
+                    SendErrorPage(response, "404 - Not Found");
+                    statusCode = 404;
+                }
+                else if (File.Exists(fullPath))
+                {
+                    SendFile(response, fullPath);
+                    statusCode = 200;
+                }
+                else
+                {
+                    response.StatusCode = 404;
+                    response.StatusDescription = "Not Found";
+                    SendErrorPage(response, "404 - Not Found");
+                    statusCode = 404;
+                }
             }
         }
         catch (Exception ex)
         {
             response.StatusCode = 500;
             response.StatusDescription = "Internal Server Error";
-            WriteErrorResponse(response, "500 - Internal Server Error");
+            SendErrorPage(response, "500 - Internal Server Error");
             statusCode = 500;
             Console.WriteLine($"Error: {ex}");
         }
         finally
         {
-            LogRequest(request, statusCode, logFile, logLock);
+            WriteLog(request, statusCode, logFile, logLock);
             response.OutputStream.Close();
         }
     }
 
-    static void ServeFile(HttpListenerResponse response, string filePath)
+    static void SendFile(HttpListenerResponse response, string filePath)
     {
         string extension = Path.GetExtension(filePath);
-        string mime = extension switch
+        var mimeTypes = new Dictionary<string, string>
         {
-            ".html" or ".htm" => "text/html",
-            ".css" => "text/css",
-            ".js" => "application/javascript",
-            ".json" => "application/json",
-            ".png" => "image/png",
-            ".jpg" or ".jpeg" => "image/jpeg",
-            ".gif" => "image/gif",
-            ".ico" => "image/x-icon",
-            ".txt" => "text/plain",
-            _ => "application/octet-stream"
+            [".html"] = "text/html",
+            [".css"] = "text/css",
+            [".js"] = "application/javascript",
+            [".png"] = "image/png",
+            [".jpg"] = "image/jpeg",
+            [".txt"] = "text/plain"
         };
+
+        string mime = mimeTypes.ContainsKey(extension) ? mimeTypes[extension] : "application/octet-stream";
         response.ContentType = mime;
 
-        byte[] buffer = File.ReadAllBytes(filePath);
-        response.ContentLength64 = buffer.Length;
-        response.OutputStream.Write(buffer, 0, buffer.Length);
+        using (FileStream fs = File.OpenRead(filePath))
+        {
+            response.ContentLength64 = fs.Length;
+            fs.CopyTo(response.OutputStream);
+        }
     }
 
-    static void WriteErrorResponse(HttpListenerResponse response, string message)
+    static void SendErrorPage(HttpListenerResponse response, string message)
     {
         byte[] buffer = Encoding.UTF8.GetBytes($"<html><body><h1>{message}</h1></body></html>");
         response.ContentType = "text/html; charset=utf-8";
@@ -118,12 +128,15 @@ class Program
         response.OutputStream.Write(buffer, 0, buffer.Length);
     }
 
-    static void LogRequest(HttpListenerRequest request, int statusCode, string logFile, object logLock)
+    static void WriteLog(HttpListenerRequest request, int statusCode, string logFile, object logLock)
     {
         string ip = request.RemoteEndPoint?.Address?.ToString() ?? "unknown";
         string path = request.Url.AbsolutePath;
         string date = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        string logLine = $"{date} | IP: {ip} | Path: {path} | Code: {statusCode}";
+        string method = request.HttpMethod;
+        //string agent = request.UserAgent ?? "unknown";
+        //string logLine = $"{date} | {method} | IP: {ip} | Path: {path} | Code: {statusCode} | Agent: {agent}";
+        string logLine = $"{date} | {method} | IP: {ip} | Path: {path} | Code: {statusCode}";
 
         lock (logLock)
         {
